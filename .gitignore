@@ -1,0 +1,9 @@
+.venv/
+.retail_analyzer_cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+*.egg-info/
+*_analyzed.xlsx
+tests/fixtures/out.xlsx
