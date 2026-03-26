@@ -1,4 +1,5 @@
 from retail_analyzer.excel_io import (
+    guess_category_column,
     guess_description_column,
     guess_image_column,
     guess_price_column,
@@ -16,6 +17,10 @@ def test_guess_price_column():
 
 def test_guess_description_column():
     assert guess_description_column(["id", "product_title"]) == "product_title"
+
+
+def test_guess_category_column():
+    assert guess_category_column(["id", "Product_Category", "price"]) == "Product_Category"
 
 
 def test_parse_image_urls_comma_separated():

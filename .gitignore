@@ -7,3 +7,5 @@ dist/
 *.egg-info/
 *_analyzed.xlsx
 tests/fixtures/out.xlsx
+# Excel lock files while a workbook is open
+~$*.xlsx

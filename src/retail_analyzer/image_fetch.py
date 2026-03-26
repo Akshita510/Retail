@@ -9,6 +9,7 @@ import requests
 from PIL import Image
 
 from retail_analyzer.config import AnalyzerConfig
+from retail_analyzer.excel_io import resolve_image_path
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,20 @@ def _url_cache_key(url: str) -> str:
 
 
 def fetch_image_pil(url: str, config: AnalyzerConfig) -> Image.Image | None:
-    """Download image and return RGB PIL image, or None on failure."""
+    """Load image from local path or HTTP URL; return RGB PIL image, or None on failure."""
     if not isinstance(url, str) or not url.strip():
         return None
     u = url.strip()
+    local = resolve_image_path(u)
+    if local is not None:
+        try:
+            img = Image.open(local)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            return img
+        except Exception as e:  # noqa: BLE001
+            logger.debug("local image open failed %s: %s", local, e)
+            return None
     try:
         r = requests.get(
             u,

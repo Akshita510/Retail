@@ -5,11 +5,27 @@ import re
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook
+
+
+def resolve_image_path(ref: str) -> Path | None:
+    """Return a readable file path for local image refs, or None."""
+    ref = ref.strip()
+    if not ref:
+        return None
+    p = Path(ref)
+    if p.is_file():
+        return p.resolve()
+    q = Path.cwd() / ref
+    if q.is_file():
+        return q.resolve()
+    return None
 
 
 def parse_image_urls(value: object) -> list[str]:
     """
-    Split a cell that may hold multiple HTTP(S) links (comma/semicolon/newline separated).
+    Split a cell into multiple image refs: HTTP(S) URLs or local file paths
+    (comma/semicolon/newline separated). Local paths are normalized to absolute.
     """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
@@ -20,8 +36,14 @@ def parse_image_urls(value: object) -> list[str]:
     out: list[str] = []
     for p in parts:
         p = p.strip()
+        if not p:
+            continue
         if len(p) >= 8 and p.lower().startswith("http"):
             out.append(p)
+            continue
+        resolved = resolve_image_path(p)
+        if resolved is not None:
+            out.append(str(resolved))
     return out
 
 
@@ -38,10 +60,33 @@ def load_excel_bytes(data: bytes, sheet: str | int | None = 0) -> pd.DataFrame:
     return pd.read_excel(buf, sheet_name=sheet, engine="openpyxl")
 
 
-def save_excel(df: pd.DataFrame, path: Path) -> None:
+def save_excel(
+    df: pd.DataFrame,
+    path: Path,
+    *,
+    image_column: str | None = None,
+    embed_image_previews: bool = True,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(path, index=False, engine="openpyxl")
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    wb = load_workbook(buf)
+    ws = wb.active
+    if embed_image_previews and ws is not None:
+        from retail_analyzer.excel_preview import enrich_workbook_with_image_previews
+
+        img_col = image_column
+        if img_col is None and "_detected_image_column" in df.columns:
+            raw = df["_detected_image_column"].iloc[0]
+            if isinstance(raw, str) and raw.strip():
+                img_col = raw.strip()
+        if img_col is None:
+            img_col = guess_image_column(list(df.columns))
+        if img_col and img_col in df.columns:
+            enrich_workbook_with_image_previews(wb, ws, df, img_col)
+    wb.save(path)
 
 
 def guess_image_column(columns: list[str]) -> str | None:
@@ -76,6 +121,24 @@ def guess_description_column(columns: list[str]) -> str | None:
         low = str(c).lower()
         if any(x in low for x in ("desc", "title", "name", "product")):
             return str(c)
+    return None
+
+
+def guess_category_column(columns: list[str]) -> str | None:
+    """Column that likely holds product category or type (for within-category checks)."""
+    patterns = (
+        r"category",
+        r"\btype\b",
+        r"product_type",
+        r"department",
+        r"\bclass\b",
+        r"segment",
+    )
+    lowered = [(c, str(c).lower()) for c in columns]
+    for pat in patterns:
+        for orig, low in lowered:
+            if re.search(pat, low):
+                return str(orig)
     return None
 
 

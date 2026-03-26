@@ -149,13 +149,82 @@ def find_similar_groups_multi(
     return row_to_group
 
 
-def run_image_similarity_for_dataframe(df, img_col: str, config: AnalyzerConfig) -> tuple[dict[Any, int], set[Any]]:
+def compute_duplicate_row_scores_and_comments(
+    row_embs: dict[Any, np.ndarray],
+    groups: dict[Any, int],
+    threshold: float,
+    row_num: dict[Any, int],
+) -> tuple[dict[Any, float], dict[Any, str]]:
     """
-    Returns (row -> group_id, set of row labels with at least one embedded image).
+    For each row in a duplicate group, compute the strongest cosine similarity to another
+    row in the same group and a short human-readable summary.
+    """
+    if not groups:
+        return {}, {}
+
+    clusters: dict[int, list[Any]] = defaultdict(list)
+    for ix, gid in groups.items():
+        clusters[gid].append(ix)
+
+    scores: dict[Any, float] = {}
+    comments: dict[Any, str] = {}
+    thr = float(threshold)
+
+    for ix, gid in groups.items():
+        members = clusters[gid]
+        normed_i = normalize(row_embs[ix], norm="l2", axis=1)
+        best_sim = 0.0
+        best_partner: Any = None
+        for j in members:
+            if j == ix:
+                continue
+            normed_j = normalize(row_embs[j], norm="l2", axis=1)
+            sim = float(np.max(normed_i @ normed_j.T))
+            if sim > best_sim:
+                best_sim = sim
+                best_partner = j
+        if best_partner is None:
+            continue
+        scores[ix] = best_sim
+        rn_partner = row_num.get(best_partner, best_partner)
+        n_in_group = len(members)
+        pct_match = best_sim * 100.0
+        pct_min = thr * 100.0
+        others = n_in_group - 1
+        others_phrase = (
+            f"{others} other listing(s) in this group also look like the same product."
+            if others != 1
+            else "One other listing in this group also looks like the same product."
+        )
+        comments[ix] = (
+            f"The product image here looks like the same item as row {rn_partner} "
+            f"(roughly {pct_match:.0f}% match). "
+            f"{others_phrase} "
+            f"You set the tool to group rows when images are at least {pct_min:.0f}% similar."
+        )
+    return scores, comments
+
+
+def run_image_similarity_for_dataframe(
+    df, img_col: str, config: AnalyzerConfig
+) -> tuple[dict[Any, int], set[Any], dict[Any, float], dict[Any, str]]:
+    """
+    Returns (row -> group_id, rows with at least one embedded image,
+    per-row max similarity within group, per-row summary comment).
     """
     row_urls, unique_urls = collect_unique_urls_from_column(df, img_col)
     url_to_vec = _encode_url_batch(unique_urls, config)
     row_embs = row_embedding_matrices(row_urls, url_to_vec)
     ok_rows = set(row_embs.keys())
     groups = find_similar_groups_multi(row_embs, config)
-    return groups, ok_rows
+    row_num = {ix: i + 1 for i, ix in enumerate(df.index)}
+    scores: dict[Any, float] = {}
+    comments: dict[Any, str] = {}
+    if groups:
+        scores, comments = compute_duplicate_row_scores_and_comments(
+            row_embs,
+            groups,
+            config.image_similarity_threshold,
+            row_num,
+        )
+    return groups, ok_rows, scores, comments

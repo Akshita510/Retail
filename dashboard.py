@@ -1,5 +1,5 @@
 """
-Streamlit UI: upload catalog Excel, run analysis, view rows with images and flags.
+Streamlit UI: upload catalog Excel, then run either duplication or anomaly analysis (one at a time).
 
 Run: python -m poetry run streamlit run dashboard.py
 """
@@ -13,7 +13,15 @@ import pandas as pd
 import streamlit as st
 
 from retail_analyzer.config import AnalyzerConfig
-from retail_analyzer.excel_io import list_sheet_names_bytes, load_excel_bytes, parse_image_urls
+from retail_analyzer.excel_io import (
+    guess_category_column,
+    guess_description_column,
+    guess_image_column,
+    guess_price_column,
+    load_excel_bytes,
+)
+from retail_analyzer.merge import dataframe_to_excel_bytes, merge_visual_duplicate_rows
+from retail_analyzer.retail_anomaly_detection import ANOMALY_HELP_BULLETS
 from retail_analyzer.pipeline import analyze_dataframe
 
 logging.basicConfig(level=logging.INFO)
@@ -25,362 +33,561 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-
 def _inject_styles() -> None:
-    st.markdown(
+        st.markdown(
         """
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
         <style>
-            html, body, [class*="stApp"] {
-                font-family: 'Outfit', system-ui, sans-serif !important;
+            html, body, [class*="stApp"] { font-family: 'Plus Jakarta Sans', system-ui, sans-serif !important; }
+            .block-container { padding-top: 1rem; padding-bottom: 2.5rem; max-width: 1100px; }
+            .hero {
+                background: linear-gradient(135deg, #0d9488 0%, #0f766e 45%, #155e75 100%);
+                border-radius: 20px;
+                padding: 1.5rem 1.75rem;
+                margin-bottom: 1.25rem;
+                box-shadow: 0 16px 48px -20px rgba(13, 148, 136, 0.55);
+                position: relative; overflow: hidden;
             }
-            .block-container {
-                padding-top: 1.25rem;
-                padding-bottom: 3rem;
-                max-width: 1280px;
+            .hero::after {
+                content: ""; position: absolute; right: -40px; top: -40px; width: 180px; height: 180px;
+                border-radius: 50%; background: rgba(255,255,255,0.08); pointer-events: none;
             }
-            .hero-wrap {
-                background: linear-gradient(135deg, #0f766e 0%, #115e59 48%, #134e4a 100%);
-                border-radius: 16px;
-                padding: 1.75rem 2rem 1.85rem;
-                margin-bottom: 1.75rem;
-                box-shadow: 0 12px 40px -12px rgba(15, 118, 110, 0.45);
+            .hero h1 {
+                color: #f0fdfa !important; font-weight: 700; font-size: 1.65rem; margin: 0 0 0.4rem 0;
+                letter-spacing: -0.03em; border: none;
             }
-            .hero-wrap h1 {
-                color: #ecfdf5 !important;
-                font-weight: 700;
-                font-size: 1.85rem;
-                letter-spacing: -0.02em;
-                margin: 0 0 0.35rem 0;
-                border: none;
+            .hero p { color: #ccfbf1; margin: 0; font-size: 0.95rem; line-height: 1.5; opacity: 0.95; }
+            .hero-anom {
+                background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 50%, #4c1d95 100%) !important;
+                box-shadow: 0 16px 48px -20px rgba(91, 33, 182, 0.45) !important;
             }
-            .hero-sub {
-                color: #99f6e4;
-                font-size: 1rem;
-                font-weight: 400;
-                line-height: 1.5;
-                margin: 0;
-                opacity: 0.95;
+            .card-visual {
+                background: linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
+                border: 1px solid #e7e5e4; border-radius: 16px; padding: 1rem 1.15rem; margin: 0.5rem 0 1rem 0;
             }
-            .panel-label {
-                font-size: 0.72rem;
-                font-weight: 600;
-                letter-spacing: 0.12em;
-                text-transform: uppercase;
-                color: #78716c;
-                margin-bottom: 0.65rem;
+            .section-title {
+                font-size: 0.7rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+                color: #a8a29e; margin: 1.25rem 0 0.6rem 0;
             }
             div[data-testid="stExpander"] {
-                background: #ffffff;
-                border: 1px solid #e7e5e4 !important;
-                border-radius: 12px !important;
-                margin-bottom: 0.65rem;
-                box-shadow: 0 1px 3px rgba(28, 25, 23, 0.04);
-            }
-            div[data-testid="stExpander"] details {
-                border: none !important;
+                background: #fafaf9; border: 1px solid #e7e5e4 !important; border-radius: 14px !important;
+                margin-bottom: 0.5rem;
             }
             div[data-testid="stMetric"] {
-                background: #ffffff;
-                border: 1px solid #e7e5e4;
-                border-radius: 12px;
-                padding: 0.65rem 0.85rem;
-                box-shadow: 0 1px 2px rgba(28, 25, 23, 0.04);
+                background: #fff; border: 1px solid #e7e5e4; border-radius: 14px; padding: 0.75rem 1rem;
             }
-            div[data-testid="stMetric"] label {
-                font-size: 0.8rem !important;
-            }
-            .stButton > button[kind="primary"] {
-                border-radius: 10px;
-                font-weight: 600;
-                padding: 0.5rem 1.25rem;
-                width: 100%;
-            }
-            section[data-testid="stFileUploader"] {
-                border: 2px dashed #d6d3d1;
-                border-radius: 12px;
-                padding: 0.5rem;
-                background: #ffffff;
-            }
-            section[data-testid="stFileUploader"]:hover {
-                border-color: #0f766e;
-                background: #f0fdfa;
+            .action-bar {
+                background: #f5f5f4; border: 1px solid #e7e5e4; border-radius: 14px; padding: 1rem 1.1rem; margin: 1rem 0;
             }
             div[data-testid="stImage"] img {
-                border-radius: 10px !important;
-                border: 1px solid #e7e5e4 !important;
-                box-shadow: 0 4px 14px -4px rgba(28, 25, 23, 0.12);
-            }
-            div[data-testid="stCaption"] {
-                font-size: 0.72rem !important;
-                color: #78716c !important;
-                word-break: break-all;
-                line-height: 1.35 !important;
+                border-radius: 12px !important; border: 1px solid #e7e5e4 !important;
             }
             .badge {
-                display: inline-block;
-                padding: 0.15rem 0.5rem;
-                border-radius: 999px;
-                font-size: 0.75rem;
-                font-weight: 600;
+                display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px;
+                font-size: 0.72rem; font-weight: 600;
             }
-            .badge-dup { background: #ccfbf1; color: #115e59; }
-            .badge-ok { background: #e7e5e4; color: #57534e; }
-            .badge-warn { background: #ffedd5; color: #9a3412; }
-            .detail-grid { font-size: 0.9rem; line-height: 1.65; color: #44403c; }
-            .detail-grid strong { color: #1c1917; }
-            hr.soft { border: none; border-top: 1px solid #e7e5e4; margin: 1.25rem 0; }
+            .badge-dup { background: #ccfbf1; color: #0f766e; }
+            .badge-anom { background: #ffedd5; color: #9a3412; }
+            .badge-both { background: #ede9fe; color: #5b21b6; }
+            .detail-grid { font-size: 0.88rem; line-height: 1.6; color: #44403c; }
+            hr.soft { border: none; border-top: 1px solid #e7e5e4; margin: 1rem 0; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def _hero() -> None:
+def _hero(mode: str | None = None) -> None:
+    if mode is None:
+        st.markdown(
+            """
+            <div class="hero">
+                <h1>✨ Catalog intelligence</h1>
+                <p>Two tools in one: find duplicate product images, or scan your sheet for retail data issues. Pick a mode below — only one runs at a time.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+    titles = {
+        "duplication": (
+            "🖼️ Duplication analysis",
+            "Same image URL + similar description & category (cosine ≥ 0.8). Groups get a duplicate_group_id.",
+        ),
+        "anomaly": (
+            "📊 Anomaly analysis",
+            "Image–text mismatches, price outliers (±3σ by category), missing fields, and invalid formats.",
+        ),
+    }
+    title, sub = titles.get(mode, ("Analysis", ""))
+    extra = " hero-anom" if mode == "anomaly" else ""
     st.markdown(
-        """
-        <div class="hero-wrap">
-            <h1>Catalog intelligence</h1>
-            <p class="hero-sub">
-                Find visually similar listings and data anomalies from your retail spreadsheet—results stay in the browser; no export required.
-            </p>
+        f"""
+        <div class="hero{extra}">
+            <h1>{title}</h1>
+            <p>{sub}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-@st.cache_data(show_spinner=False)
-def _sheet_names(data: bytes) -> list[str]:
-    return list_sheet_names_bytes(data)
+def _needs_review_mask(result: pd.DataFrame, mode: str) -> pd.Series:
+    gid_col = "duplicate_group_id" if "duplicate_group_id" in result.columns else "similar_image_group_id"
+    dup = result[gid_col] >= 0 if gid_col in result.columns else pd.Series(False, index=result.index)
+    if "anomaly_flag" in result.columns:
+        anom = result["anomaly_flag"].apply(lambda x: bool(x) if not isinstance(x, str) else str(x).lower() in ("true", "yes", "1"))
+    else:
+        af = result["anomaly_flags"].fillna("").astype(str).str.strip()
+        anom = af.str.len() > 0
+    if mode == "duplication":
+        return dup
+    if mode == "anomaly":
+        return anom
+    return dup | anom
 
 
-def _result_stats(result: pd.DataFrame) -> tuple[int, int, int, int]:
-    """rows in dup groups, unique dup group ids, rows with flags, total rows."""
+def _row_numbers(df: pd.DataFrame) -> dict[object, int]:
+    return {ix: i + 1 for i, ix in enumerate(df.index)}
+
+
+def _sync_dup_editor_state(result: pd.DataFrame) -> None:
+    run_id = st.session_state.get("analysis_run_id", 0)
+    if st.session_state.get("_dup_run_id") != run_id:
+        st.session_state["dup_sheet_df"] = result.copy()
+        st.session_state["_dup_run_id"] = run_id
+
+
+def _duplication_summary_table(ed: pd.DataFrame) -> pd.DataFrame:
+    row_no = _row_numbers(ed)
+    gid_col = "duplicate_group_id" if "duplicate_group_id" in ed.columns else "similar_image_group_id"
+    dup = ed[ed[gid_col] >= 0].copy()
+    if len(dup) == 0:
+        return pd.DataFrame(columns=["Row No", "Match strength", "Summary"])
+    out = pd.DataFrame(
+        {
+            "Row No": [row_no[ix] for ix in dup.index],
+            "Match strength": dup["similarity_score"].values,
+            "Summary": dup["similarity_comment"].fillna("").astype(str).values,
+        }
+    )
+    return out
+
+
+def _clear_editor_session() -> None:
+    st.session_state.pop("dup_sheet_df", None)
+    st.session_state.pop("_dup_run_id", None)
+    st.session_state.pop("anom_sheet_df", None)
+    st.session_state.pop("_anom_run_id", None)
+    st.session_state.pop("analysis_run_id", None)
+    st.session_state.pop("merged_excel_bytes", None)
+    st.session_state.pop("merged_excel_name", None)
+
+
+@st.dialog("Merge duplicate groups into one row per group")
+def merge_duplicate_dialog() -> None:
+    """Uses the current sheet (including any edits) to build a merged catalog."""
+    ed = st.session_state.get("dup_sheet_df")
+    img_col = st.session_state.get("analysis_image_col")
+    if ed is None or not img_col:
+        st.error("No data to merge.")
+        return
+    if img_col not in ed.columns:
+        st.error(f"Image column «{img_col}» is not in the sheet.")
+        return
+    gid_col = "duplicate_group_id" if "duplicate_group_id" in ed.columns else "similar_image_group_id"
+    if gid_col not in ed.columns:
+        st.error("Missing duplicate group column. Run analysis again.")
+        return
+    dup = ed[ed[gid_col] >= 0]
+    n_g = int(dup[gid_col].nunique()) if len(dup) else 0
+    st.markdown(
+        f"**{len(dup)} rows** in **{n_g} duplicate group(s)** will be merged into **{n_g} rows**. "
+        "Images are combined into one cell; differing text fields are joined with ` | `."
+    )
+    st.caption("Rows that are not in a duplicate group stay as they are.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button("Approve & build Excel", type="primary", use_container_width=True):
+            merged = merge_visual_duplicate_rows(ed, img_col)
+            st.session_state["merged_excel_bytes"] = dataframe_to_excel_bytes(
+                merged, image_column=img_col
+            )
+            st.session_state["merged_excel_name"] = st.session_state.get(
+                "_merge_dup_filename", "merged_catalog.xlsx"
+            )
+            st.rerun()
+
+
+DEFAULT_CACHE_DIR = Path(".retail_analyzer_cache")
+
+
+def _anomaly_issue_counts(ed: pd.DataFrame) -> pd.Series:
+    from collections import Counter
+
+    c: Counter[str] = Counter()
+    col = "anomaly_type" if "anomaly_type" in ed.columns else "anomaly_flags"
+    if col not in ed.columns:
+        return pd.Series(dtype=float)
+    for raw in ed[col].fillna(""):
+        for part in str(raw).split(";"):
+            p = part.strip()
+            if p:
+                c[p] += 1
+    if not c:
+        return pd.Series(dtype=float)
+    s = pd.Series(dict(c)).sort_values(ascending=False)
+    s.index = s.index.map(lambda x: x.replace("_", " ").title())
+    return s
+
+
+def _result_stats(result: pd.DataFrame, mode: str) -> tuple[int, int, int, int, int]:
     total = len(result)
-    dup_mask = result["similar_image_group_id"] >= 0
+    gid_col = "duplicate_group_id" if "duplicate_group_id" in result.columns else "similar_image_group_id"
+    dup_mask = result[gid_col] >= 0 if gid_col in result.columns else pd.Series(False, index=result.index)
     rows_dup = int(dup_mask.sum())
-    n_groups = int(result.loc[dup_mask, "similar_image_group_id"].nunique()) if rows_dup else 0
-    af = result["anomaly_flags"].fillna("").astype(str).str.strip()
-    rows_flag = int((af.str.len() > 0).sum())
-    return rows_dup, n_groups, rows_flag, total
+    n_groups = int(result.loc[dup_mask, gid_col].nunique()) if rows_dup else 0
+    if "anomaly_flag" in result.columns:
+        rows_flag = int(
+            result["anomaly_flag"].apply(
+                lambda x: bool(x) if not isinstance(x, str) else str(x).lower() in ("true", "yes", "1")
+            ).sum()
+        )
+    else:
+        af = result["anomaly_flags"].fillna("").astype(str).str.strip()
+        rows_flag = int((af.str.len() > 0).sum())
+    review = int(_needs_review_mask(result, mode).sum())
+    return total, review, rows_dup, n_groups, rows_flag
 
 
 def main() -> None:
     _inject_styles()
-    _hero()
+    mode = st.session_state.get("analysis_mode")
 
-    up = st.file_uploader(
-        "Drop your workbook here",
-        type=["xlsx"],
-        help="Supports multi-image cells (comma-separated URLs).",
-    )
-    if not up:
-        st.markdown('<p class="panel-label">Get started</p>', unsafe_allow_html=True)
-        st.info("Upload an **.xlsx** file to configure the sheet, map columns, and run analysis.")
+    if mode is None:
+        _hero(None)
+        st.markdown('<p class="section-title">Start here</p>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Duplication analysis", type="primary", use_container_width=True):
+                st.session_state["analysis_mode"] = "duplication"
+                st.session_state.pop("analysis_result", None)
+                st.session_state.pop("_upload_key", None)
+                _clear_editor_session()
+                st.rerun()
+        with c2:
+            if st.button("Anomaly analysis", type="primary", use_container_width=True):
+                st.session_state["analysis_mode"] = "anomaly"
+                st.session_state.pop("analysis_result", None)
+                st.session_state.pop("_upload_key", None)
+                _clear_editor_session()
+                st.rerun()
+        st.caption("Pick one workflow, then upload your workbook. Duplication and anomaly detection do not run together.")
         return
 
-    data = up.getvalue()
-    file_key = f"{up.name}:{len(data)}"
-    if st.session_state.get("_upload_key") != file_key:
-        st.session_state["_upload_key"] = file_key
-        st.session_state.pop("analysis_result", None)
+    assert mode in ("duplication", "anomaly")
+    _hero(mode)
+    back_c, _ = st.columns((1, 4))
+    with back_c:
+        if st.button("← Change analysis type"):
+            st.session_state.pop("analysis_mode", None)
+            st.session_state.pop("analysis_result", None)
+            st.session_state.pop("_upload_key", None)
+            _clear_editor_session()
+            st.rerun()
 
-    try:
-        sheets = _sheet_names(data)
-    except Exception as e:  # noqa: BLE001
-        st.error(f"Could not read workbook: {e}")
-        return
-
-    st.markdown('<p class="panel-label">Analysis setup</p>', unsafe_allow_html=True)
-    cfg_row = st.columns((1.1, 1.1, 1), gap="medium")
-    with cfg_row[0]:
-        sheet = st.selectbox("Sheet", options=sheets, index=0)
-    with cfg_row[1]:
-        skip_images = st.checkbox("Skip images (rules only)", value=False)
-    with cfg_row[2]:
-        st.caption(f"**File:** {up.name}")
-
-    sheet_arg: str | int = sheet
-    df0 = load_excel_bytes(data, sheet=sheet_arg)
-    cols = [str(c) for c in df0.columns]
-
-    map_row = st.columns(3, gap="medium")
-    with map_row[0]:
-        img_default = next(
-            (c for c in cols if "image" in c.lower() and "url" in c.lower()),
-            cols[0] if cols else "",
+    if mode == "duplication":
+        up = st.file_uploader(
+            "Workbook (.xlsx)",
+            type=["xlsx"],
+            help="Uses the first sheet. Image URLs are detected automatically from column names.",
         )
-        image_column = st.selectbox(
-            "Image URL column",
-            options=cols,
-            index=cols.index(img_default) if img_default in cols else 0,
-        )
-    with map_row[1]:
-        price_opts = ["(none)"] + cols
-        pc = st.selectbox("Price column", options=price_opts, index=0)
-        price_column = None if pc == "(none)" else pc
-    with map_row[2]:
-        desc_guess = next(
-            (c for c in cols if "product" in c.lower() and "name" in c.lower()),
-            cols[0] if cols else "",
-        )
-        desc_opts = ["(auto)"] + cols
-        di = desc_opts.index(desc_guess) if desc_guess in desc_opts else 0
-        dc = st.selectbox("Description column", options=desc_opts, index=di)
-        description_column = None if dc == "(auto)" else dc
+        similarity_threshold = st.slider("Image similarity threshold", 0.5, 1.0, 0.86, 0.01)
+        if not up:
+            st.caption("Upload a file to continue.")
+            return
 
-    adv = st.columns((1.4, 1), gap="medium")
-    with adv[0]:
-        similarity_threshold = st.slider(
-            "Similarity threshold",
-            min_value=0.5,
-            max_value=1.0,
-            value=0.86,
-            step=0.01,
-            help="Higher values mean stricter “same product” grouping.",
-        )
-    with adv[1]:
-        cache_dir = st.text_input("Image cache folder", value=".retail_analyzer_cache")
+        data = up.getvalue()
+        file_key = f"{up.name}:{len(data)}:dup:{similarity_threshold}"
+        if st.session_state.get("_upload_key") != file_key:
+            st.session_state["_upload_key"] = file_key
+            st.session_state.pop("analysis_result", None)
+            _clear_editor_session()
 
-    run = st.button("Run analysis", type="primary", use_container_width=True)
+        try:
+            df0 = load_excel_bytes(data, sheet=0)
+        except Exception as e:  # noqa: BLE001
+            st.error(str(e))
+            return
 
-    if run:
-        cfg = AnalyzerConfig(
-            image_similarity_threshold=float(similarity_threshold),
-            image_neighbor_k=15,
-            cache_dir=Path(cache_dir),
+        cols = [str(c) for c in df0.columns]
+        img_col = guess_image_column(cols)
+        if not img_col:
+            st.error(
+                "Could not detect an image column automatically. "
+                "Rename a column to include something like image, photo, url, or link."
+            )
+            return
+
+        st.caption(f"File: **{up.name}** · first sheet · image column: **{img_col}**")
+
+        if st.button("Run duplication analysis", type="primary", use_container_width=True):
+            cfg = AnalyzerConfig(
+                image_similarity_threshold=float(similarity_threshold),
+                image_neighbor_k=15,
+                cache_dir=DEFAULT_CACHE_DIR,
+                enable_context_anomalies=False,
+            )
+            with st.spinner("Analyzing…"):
+                try:
+                    result = analyze_dataframe(
+                        df0,
+                        image_column=img_col,
+                        price_column=None,
+                        description_column=None,
+                        skip_images=False,
+                        skip_anomalies=True,
+                        config=cfg,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("analyze_dataframe failed")
+                    st.error(str(e))
+                    return
+            st.session_state["analysis_run_id"] = (st.session_state.get("analysis_run_id") or 0) + 1
+            st.session_state["analysis_result"] = result
+            st.session_state["analysis_image_col"] = img_col
+            st.session_state["dup_upload_name"] = up.name
+            st.session_state.pop("merged_excel_bytes", None)
+            st.session_state.pop("merged_excel_name", None)
+            base = Path(up.name).stem if up.name else "catalog"
+            st.session_state["_merge_dup_filename"] = f"{base}_merged.xlsx"
+
+    else:
+        up = st.file_uploader(
+            "Workbook (.xlsx)",
+            type=["xlsx"],
+            help="Uses the first sheet. Columns are inferred from headers.",
         )
-        with st.spinner("Running analysis… (first run may download the CLIP model)"):
-            try:
-                result = analyze_dataframe(
-                    df0,
-                    image_column=image_column,
-                    price_column=price_column,
-                    description_column=description_column,
-                    skip_images=skip_images,
-                    config=cfg,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.exception("analyze_dataframe failed")
-                st.error(str(e))
-                return
-        st.session_state["analysis_result"] = result
-        st.session_state["analysis_image_col"] = image_column
+        if not up:
+            st.caption("Upload a file to continue.")
+            return
+
+        data = up.getvalue()
+        file_key = f"{up.name}:{len(data)}:anom"
+        if st.session_state.get("_upload_key") != file_key:
+            st.session_state["_upload_key"] = file_key
+            st.session_state.pop("analysis_result", None)
+            _clear_editor_session()
+
+        try:
+            df0 = load_excel_bytes(data, sheet=0)
+        except Exception as e:  # noqa: BLE001
+            st.error(str(e))
+            return
+
+        cols = [str(c) for c in df0.columns]
+        img_col = guess_image_column(cols)
+        price_col = guess_price_column(cols)
+        desc_col = guess_description_column(cols)
+        cat_col = guess_category_column(cols)
+        st.caption(
+            f"File: **{up.name}** · first sheet · "
+            f"image: **{img_col or '—'}** · price: **{price_col or '—'}** · "
+            f"description: **{desc_col or '—'}** · category: **{cat_col or '—'}**"
+        )
+
+        if st.button("Run anomaly analysis", type="primary", use_container_width=True):
+            cfg = AnalyzerConfig(
+                image_similarity_threshold=0.86,
+                image_neighbor_k=15,
+                cache_dir=DEFAULT_CACHE_DIR,
+                enable_context_anomalies=False,
+            )
+            with st.spinner("Analyzing…"):
+                try:
+                    result = analyze_dataframe(
+                        df0,
+                        image_column=img_col,
+                        price_column=price_col,
+                        description_column=desc_col,
+                        skip_images=True,
+                        skip_anomalies=False,
+                        config=cfg,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("analyze_dataframe failed")
+                    st.error(str(e))
+                    return
+            st.session_state["analysis_run_id"] = (st.session_state.get("analysis_run_id") or 0) + 1
+            st.session_state["analysis_result"] = result
+            st.session_state["analysis_image_col"] = img_col
 
     if "analysis_result" not in st.session_state:
-        st.markdown('<hr class="soft">', unsafe_allow_html=True)
-        st.markdown('<p class="panel-label">Preview</p>', unsafe_allow_html=True)
-        st.dataframe(df0.head(20), use_container_width=True, hide_index=True)
         return
 
     result = st.session_state["analysis_result"]
-    img_col = st.session_state.get("analysis_image_col", image_column)
-    _render_results(result, img_col)
+    if mode == "duplication":
+        upload_name = str(st.session_state.get("dup_upload_name") or "catalog.xlsx")
+        _render_duplication_results(result, upload_name)
+    else:
+        _render_anomaly_results(result)
 
 
-def _render_results(result: pd.DataFrame, image_column: str) -> None:
-    rows_dup, n_groups, rows_flag, total = _result_stats(result)
+def _sync_anom_editor_state(result: pd.DataFrame) -> None:
+    run_id = st.session_state.get("analysis_run_id", 0)
+    if st.session_state.get("_anom_run_id") != run_id:
+        st.session_state["anom_sheet_df"] = result.copy()
+        st.session_state["_anom_run_id"] = run_id
 
-    st.markdown('<hr class="soft">', unsafe_allow_html=True)
-    st.markdown('<p class="panel-label">Results</p>', unsafe_allow_html=True)
 
-    m1, m2, m3, m4 = st.columns(4, gap="small")
+def _render_duplication_results(result: pd.DataFrame, upload_name: str) -> None:
+    _sync_dup_editor_state(result)
+    ed = st.session_state["dup_sheet_df"]
+    total, n_review, _rows_dup, n_groups, _ = _result_stats(result, "duplication")
+
+    st.markdown('<p class="section-title">Summary</p>', unsafe_allow_html=True)
+    m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Rows analyzed", f"{total:,}")
+        st.metric("Rows in file", f"{total:,}")
     with m2:
-        st.metric("Visual duplicate rows", f"{rows_dup:,}", help="Rows in a similar-image group")
+        st.metric("Rows in duplicate groups", f"{n_review:,}")
     with m3:
         st.metric("Duplicate groups", f"{n_groups:,}")
-    with m4:
-        st.metric("Rows with flags", f"{rows_flag:,}")
 
-    filt = st.columns((1, 1, 1.4), gap="medium")
-    with filt[0]:
-        show_dup = st.toggle("Only duplicate groups", value=False)
-    with filt[1]:
-        show_anom = st.toggle("Only flagged rows", value=False)
-    with filt[2]:
-        q = st.text_input("Search in table", placeholder="Filter by any visible text…")
+    st.markdown('<p class="section-title">Duplicate rows</p>', unsafe_allow_html=True)
+    st.caption("Row numbers, match strength, and a plain-language explanation for each duplicate.")
+    summary = _duplication_summary_table(ed)
+    st.dataframe(summary, use_container_width=True, hide_index=True, height=min(360, 80 + 32 * max(len(summary), 1)))
 
-    view = result.copy()
-    if show_dup:
-        view = view[view["similar_image_group_id"] >= 0]
-    if show_anom:
-        af = view["anomaly_flags"].fillna("").astype(str).str.strip()
-        view = view[af.str.len() > 0]
-    if q.strip():
-        mask = view.astype(str).apply(lambda s: s.str.contains(q, case=False, na=False)).any(axis=1)
-        view = view[mask]
-
-    show_cols = [c for c in view.columns if not str(c).startswith("_")]
-    st.dataframe(
-        view[show_cols],
+    st.markdown('<p class="section-title">Full sheet</p>', unsafe_allow_html=True)
+    st.caption("Edit cells below; download exports this version.")
+    run_id = int(st.session_state.get("analysis_run_id") or 0)
+    edited = st.data_editor(
+        ed,
+        key=f"dup_ed_{run_id}",
         use_container_width=True,
-        height=min(520, 72 + 36 * min(len(view), 14)),
         hide_index=True,
+        num_rows="dynamic",
+        height=min(520, 120 + 28 * min(len(ed), 18)),
     )
+    st.session_state["dup_sheet_df"] = edited
 
-    st.markdown('<p class="panel-label">Row gallery</p>', unsafe_allow_html=True)
-    st.caption("Expand a row for full fields and product images.")
-
-    display_ix = list(view.index)
-    for i, ix in enumerate(display_ix):
-        row = view.loc[ix]
-        gid = row.get("similar_image_group_id", -1)
-        flags = str(row.get("anomaly_flags", "") or "").strip()
-        try:
-            gid_i = int(gid)
-        except (TypeError, ValueError):
-            gid_i = -1
-
-        if gid_i >= 0:
-            badge = f'<span class="badge badge-dup">Group {gid_i}</span>'
-        elif flags:
-            badge = '<span class="badge badge-warn">Flagged</span>'
-        else:
-            badge = '<span class="badge badge-ok">Clean</span>'
-
-        label = f"Row {i + 1} · index {ix}"
-        with st.expander(f"{label}", expanded=False):
-            st.markdown(badge, unsafe_allow_html=True)
-            if flags:
-                st.markdown(f"**Flags:** `{flags}`")
-
-            detail_cols = [
-                c
-                for c in view.columns
-                if c != image_column and not str(c).startswith("_")
-            ]
-            parts = []
-            for c in detail_cols[:16]:
-                val = row[c]
-                if pd.isna(val):
-                    val = "—"
-                parts.append(f"<strong>{c}</strong>: {val}")
-            st.markdown(
-                '<div class="detail-grid">' + "<br>".join(parts) + "</div>",
-                unsafe_allow_html=True,
+    out_bytes = dataframe_to_excel_bytes(
+        st.session_state["dup_sheet_df"],
+        image_column=st.session_state.get("analysis_image_col"),
+    )
+    base = Path(upload_name).stem if upload_name else "catalog"
+    dl1, dl2, dl3 = st.columns((1, 1, 1))
+    with dl1:
+        st.download_button(
+            "Download current sheet (.xlsx)",
+            data=out_bytes,
+            file_name=f"{base}_edited.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with dl2:
+        has_dups = n_groups > 0
+        if st.button(
+            "Merge duplicate groups…",
+            use_container_width=True,
+            disabled=not has_dups,
+            help="Opens a confirmation dialog, then you can download one row per duplicate group.",
+        ):
+            merge_duplicate_dialog()
+    with dl3:
+        if st.session_state.get("merged_excel_bytes"):
+            st.download_button(
+                "Download merged catalog (.xlsx)",
+                data=st.session_state["merged_excel_bytes"],
+                file_name=st.session_state.get("merged_excel_name", "merged_catalog.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
             )
+        else:
+            st.caption("Merged file appears here after you approve in the dialog.")
 
-            urls = parse_image_urls(row.get(image_column))
-            if not urls:
-                st.caption("No image URLs in this cell.")
-                continue
 
-            n = min(len(urls), 8)
-            ncols = min(4, max(1, n))
-            img_cols = st.columns(ncols)
-            for j in range(n):
-                u = urls[j]
-                cap = u[:100] + ("…" if len(u) > 100 else "")
-                with img_cols[j % ncols]:
-                    try:
-                        st.image(u, caption=cap, use_container_width=True)
-                    except Exception:  # noqa: BLE001
-                        st.caption("Could not load image.")
+def _render_anomaly_results(result: pd.DataFrame) -> None:
+    _sync_anom_editor_state(result)
+    ed = st.session_state["anom_sheet_df"]
+    total, _, _, _, rows_flag = _result_stats(result, "anomaly")
+    row_no = _row_numbers(ed)
+
+    st.markdown('<p class="section-title">Summary</p>', unsafe_allow_html=True)
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Rows in file", f"{total:,}")
+    with m2:
+        st.metric("Rows flagged", f"{rows_flag:,}")
+    with m3:
+        pct = f"{100.0 * rows_flag / total:.1f}%" if total else "0%"
+        st.metric("Share flagged", pct)
+
+    counts = _anomaly_issue_counts(ed)
+    if len(counts) > 0:
+        st.markdown(
+            '<p class="section-title" style="margin-top:0.5rem">Issue mix</p>',
+            unsafe_allow_html=True,
+        )
+        st.caption("How often each rule fired (a row can match more than one).")
+        st.bar_chart(counts)
+
+    st.markdown('<p class="section-title">Flagged rows</p>', unsafe_allow_html=True)
+    mask = _needs_review_mask(ed, "anomaly")
+    flagged = ed.loc[mask].copy()
+    if len(flagged) == 0:
+        st.success("No anomalies detected with the current rules.")
+    else:
+        view = pd.DataFrame(
+            {
+                "Row No": [row_no[ix] for ix in flagged.index],
+                "anomaly_flag": flagged["anomaly_flag"].tolist(),
+                "anomaly_type": (
+                    flagged["anomaly_type"].tolist()
+                    if "anomaly_type" in flagged.columns
+                    else [""] * len(flagged)
+                ),
+                "reason": (
+                    flagged["reason"].tolist()
+                    if "reason" in flagged.columns
+                    else flagged["anomaly_reason"].tolist()
+                ),
+                "anomaly_score": flagged["anomaly_score"].tolist(),
+            }
+        )
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+    with st.expander("What do we check?"):
+        st.markdown("\n".join(f"- {line}" for line in ANOMALY_HELP_BULLETS))
+
+    st.markdown('<p class="section-title">Full sheet</p>', unsafe_allow_html=True)
+    st.caption("Edit cells below; download exports this version.")
+    run_id = int(st.session_state.get("analysis_run_id") or 0)
+    edited = st.data_editor(
+        ed,
+        key=f"anom_ed_{run_id}",
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        height=min(520, 120 + 28 * min(len(ed), 18)),
+    )
+    st.session_state["anom_sheet_df"] = edited
+
+    out_bytes = dataframe_to_excel_bytes(
+        st.session_state["anom_sheet_df"],
+        image_column=st.session_state.get("analysis_image_col"),
+    )
+    st.download_button(
+        "Download Excel (.xlsx)",
+        data=out_bytes,
+        file_name="catalog_anomaly_edited.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 
 if __name__ == "__main__":
